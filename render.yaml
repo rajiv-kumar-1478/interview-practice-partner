@@ -1,0 +1,67 @@
+# Render Blueprint for Interview Practice Partner
+# This file defines all services needed to deploy the application on Render
+
+services:
+  # FastAPI Application
+  - type: web
+    name: interview-practice-partner
+    runtime: python
+    plan: free  # Change to 'starter' or higher for production
+    buildCommand: pip install .
+    startCommand: uvicorn interview_practice_partner.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Twilio Configuration
+      - key: TWILIO_ACCOUNT_SID
+        sync: false  # Set manually in Render dashboard
+      - key: TWILIO_AUTH_TOKEN
+        sync: false  # Set manually in Render dashboard
+      - key: TWILIO_WHATSAPP_NUMBER
+        value: whatsapp:+14155238886  # Twilio sandbox number
+      
+      # LLM Provider (DeepSeek)
+      - key: LLM_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: LLM_API_BASE_URL
+        value: https://api.deepseek.com/v1
+      - key: LLM_MODEL
+        value: deepseek-chat
+      
+      # Groq Whisper (Voice Transcription)
+      - key: GROQ_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: GROQ_WHISPER_MODEL
+        value: whisper-large-v3-turbo
+      
+      # ElevenLabs (Text-to-Speech)
+      - key: ELEVENLABS_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: ELEVENLABS_VOICE_ID
+        value: Nj17Z4VDrfZaOdsqTaPL  # Neha - Indian English
+      - key: ELEVENLABS_MODEL_ID
+        value: eleven_turbo_v2_5
+      
+      # Media Serving
+      - key: MEDIA_BASE_URL
+        fromService:
+          type: web
+          name: interview-practice-partner
+          property: host
+      - key: MEDIA_TTL_SECONDS
+        value: 600
+      
+      # Redis Connection (will be set automatically when Redis is added)
+      - key: REDIS_URL
+        fromDatabase:
+          name: interview-practice-partner-redis
+          property: connectionString
+    
+    healthCheckPath: /health
+    
+    autoDeploy: true  # Auto-deploy on git push
+
+databases:
+  # Redis for session storage
+  - name: interview-practice-partner-redis
+    plan: free  # Change to 'starter' or higher for production
+    databaseName: interview_practice_partner
+    user: redis
