@@ -725,4 +725,3 @@ class SessionService:
             role = Role.UNKNOWN
 
         return role, message
-            return detected, raw
