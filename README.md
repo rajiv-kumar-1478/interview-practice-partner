@@ -8,6 +8,21 @@ An AI-powered WhatsApp bot that helps users prepare for job interviews through r
 
 ---
 
+## 🎯 Live Demo
+
+Try the bot right now on WhatsApp!
+
+1. Open WhatsApp on your phone
+2. Send a message to **+1 415 523 8886**
+3. Type the code: `join paragraph-fairly`
+4. Once you get the confirmation message, start chatting!
+
+**Try saying:** `Software Engineer` or `Sales Representative` to begin a mock interview.
+
+> **Note:** This is a Twilio sandbox. You need to join once before the bot can reply to you.
+
+---
+
 ## 🌟 Key Features
 
 - **🎤 Voice Note Support** - Conduct interviews using voice notes with automatic transcription (Groq Whisper) and text-to-speech responses (ElevenLabs)
