@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     llm_context_window_size: int = 6
 
     # Redis
-    redis_url: str
+    redis_url: str = "redis://localhost:6379"  # Default for local dev, override in production
     redis_session_ttl_seconds: int = 86400
     redis_idempotency_ttl_seconds: int = 600
     redis_pool_size: int = 10

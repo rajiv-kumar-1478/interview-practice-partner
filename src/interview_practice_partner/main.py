@@ -115,6 +115,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger = structlog.get_logger(__name__)
     logger.info("application_startup", version=settings.app_version, environment=settings.environment)
 
+    # Validate Redis URL format
+    if not settings.redis_url or not any(
+        settings.redis_url.startswith(scheme) for scheme in ("redis://", "rediss://", "unix://")
+    ):
+        error_msg = (
+            f"Invalid REDIS_URL: '{settings.redis_url}'. "
+            "Must start with redis://, rediss://, or unix://. "
+            "In Render, ensure the Redis database is created and linked to this service."
+        )
+        logger.error("redis_url_invalid", redis_url=settings.redis_url, error=error_msg)
+        raise ValueError(error_msg)
+
     # Open Redis connection pool
     redis_client: redis.asyncio.Redis = redis.asyncio.from_url(
         settings.redis_url,
