@@ -664,11 +664,23 @@ class SessionService:
         """Extract the ``message`` field from a role-selection LLM JSON response.
 
         Falls back to returning the raw string if JSON parsing fails.
+        Handles cases where the LLM adds extra text before/after the JSON.
         """
         try:
+            # Try to parse the entire response as JSON first
             data = json.loads(raw)
             return str(data.get("message", raw))
         except (json.JSONDecodeError, AttributeError):
+            # If that fails, try to find JSON within the response
+            import re
+            json_match = re.search(r'\{[^{}]*"message"[^{}]*\}', raw, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(0))
+                    return str(data.get("message", raw))
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            # If all parsing fails, return the raw string
             return raw
 
     @staticmethod
@@ -680,22 +692,37 @@ class SessionService:
             LLM could not identify a role with high confidence.
         """
         try:
+            # Try to parse the entire response as JSON first
             data = json.loads(raw)
-            role_str = data.get("role", "unknown")
-            confidence = data.get("confidence", "low")
-            message = str(data.get("message", raw))
-
-            # Only accept the role if confidence is high
-            if confidence == "high":
-                try:
-                    role = Role(role_str)
-                except ValueError:
-                    role = Role.UNKNOWN
-            else:
-                role = Role.UNKNOWN
-
-            return role, message
         except (json.JSONDecodeError, AttributeError):
-            # If JSON parsing fails, try to detect a role from the raw text
-            detected = _detect_role_in_message(raw)
+            # If that fails, try to find JSON within the response
+            import re
+            json_match = re.search(r'\{[^{}]*"role"[^{}]*\}', raw, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(0))
+                except (json.JSONDecodeError, AttributeError):
+                    # If JSON parsing fails, try to detect a role from the raw text
+                    detected = _detect_role_in_message(raw)
+                    return detected, raw
+            else:
+                # If JSON parsing fails, try to detect a role from the raw text
+                detected = _detect_role_in_message(raw)
+                return detected, raw
+        
+        # Successfully parsed JSON - extract fields
+        role_str = data.get("role", "unknown")
+        confidence = data.get("confidence", "low")
+        message = str(data.get("message", raw))
+
+        # Only accept the role if confidence is high
+        if confidence == "high":
+            try:
+                role = Role(role_str)
+            except ValueError:
+                role = Role.UNKNOWN
+        else:
+            role = Role.UNKNOWN
+
+        return role, message
             return detected, raw
