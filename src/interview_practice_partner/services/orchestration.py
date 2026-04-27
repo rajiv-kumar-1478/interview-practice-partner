@@ -275,5 +275,8 @@ class MessageOrchestrationService:
 
         # Construct the public URL
         base_url = (self._settings.media_base_url if self._settings else "").rstrip("/")
+        # Ensure the base URL has a scheme
+        if base_url and not base_url.startswith(("http://", "https://")):
+            base_url = f"https://{base_url}"
         media_url = f"{base_url}/media/{filename}"
         return media_url

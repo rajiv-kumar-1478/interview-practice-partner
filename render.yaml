@@ -42,26 +42,18 @@ services:
       
       # Media Serving
       - key: MEDIA_BASE_URL
-        fromService:
-          type: web
-          name: interview-practice-partner
-          property: host
+        value: https://interview-practice-partner.onrender.com
       - key: MEDIA_TTL_SECONDS
         value: 600
       
-      # Redis Connection (will be set automatically when Redis is added)
+      # Redis Connection (must be set manually in Render dashboard)
       - key: REDIS_URL
-        fromDatabase:
-          name: interview-practice-partner-redis
-          property: connectionString
+        sync: false  # Set manually after creating Redis instance
     
     healthCheckPath: /health
     
     autoDeploy: true  # Auto-deploy on git push
 
 databases:
-  # Redis for session storage
-  - name: interview-practice-partner-redis
-    plan: free  # Change to 'starter' or higher for production
-    databaseName: interview_practice_partner
-    user: redis
+  # Redis for session storage (Note: Render Blueprint doesn't support Redis in YAML)
+  # You must manually create a Redis instance in Render dashboard and link it
