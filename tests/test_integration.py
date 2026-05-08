@@ -172,7 +172,7 @@ class TestFullWebhookFlow:
     async def test_role_in_opening_message_starts_interview_directly(
         self, app_with_fakeredis, mocker
     ) -> None:
-        """Opening message containing a role skips role-selection and starts interview.
+        """Opening message containing SWE role skips role-selection and goes to round type selection.
 
         Requirements: 1.1, 1.4, 2.1, 2.3
         """
@@ -198,12 +198,13 @@ class TestFullWebhookFlow:
 
         assert response.status_code == 200
 
-        # Session must be in INTERVIEW stage with the correct role
+        # Session must be in ROUND_TYPE_SELECTION stage with the correct role
+        # (SOFTWARE_ENGINEER goes to round type selection before starting interview)
         session = await RedisSessionRepository(
             redis_client=fake_redis, ttl_seconds=86400
         ).get(_FROM_NUMBER)
         assert session is not None
-        assert session.stage == Stage.INTERVIEW
+        assert session.stage == Stage.ROUND_TYPE_SELECTION
         assert session.role == Role.SOFTWARE_ENGINEER
 
         # Twilio send must target the sender

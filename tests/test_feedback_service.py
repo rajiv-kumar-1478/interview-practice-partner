@@ -668,3 +668,376 @@ class TestReplyTextFormatting:
 
         # The off-topic section header should not appear
         assert "Responses That Were Off-Topic" not in reply_text
+
+
+# ===========================================================================
+# Technical feedback — DSA round
+# ===========================================================================
+
+
+def make_technical_service(
+    llm_response: str = "",
+) -> tuple[FeedbackService, AsyncMock, MagicMock]:
+    """Build a FeedbackService with mocked dependencies for technical rounds."""
+    from interview_practice_partner.domain.enums import InterviewRoundType
+
+    mock_llm = AsyncMock()
+    mock_llm.complete.return_value = llm_response
+
+    mock_prompt_builder = MagicMock()
+    mock_prompt_builder.build_technical_feedback_prompt.return_value = [
+        {"role": "system", "content": "technical system prompt"},
+        {"role": "user", "content": "technical user prompt"},
+    ]
+
+    service = FeedbackService(
+        llm_client=mock_llm,
+        prompt_builder=mock_prompt_builder,
+    )
+    return service, mock_llm, mock_prompt_builder
+
+
+def _make_dsa_feedback_json(
+    strengths: list[str] | None = None,
+    improvements: list[str] | None = None,
+    recommendations: list[str] | None = None,
+    complexity_summary: str | None = None,
+    problem_solving_approach: str | None = None,
+) -> str:
+    return json.dumps({
+        "strengths": strengths or ["Good use of hash maps for O(1) lookups."],
+        "improvements": improvements or ["Consider edge cases for empty inputs."],
+        "actionable_recommendations": recommendations or ["Practice dynamic programming problems."],
+        "complexity_summary": complexity_summary,
+        "problem_solving_approach": problem_solving_approach,
+    })
+
+
+def _make_system_design_feedback_json(
+    strengths: list[str] | None = None,
+    improvements: list[str] | None = None,
+    recommendations: list[str] | None = None,
+    design_thinking: str | None = None,
+    scalability_awareness: str | None = None,
+) -> str:
+    return json.dumps({
+        "strengths": strengths or ["Clear component separation."],
+        "improvements": improvements or ["Consider caching strategies."],
+        "actionable_recommendations": recommendations or ["Study distributed systems patterns."],
+        "design_thinking": design_thinking,
+        "scalability_awareness": scalability_awareness,
+    })
+
+
+class TestTechnicalFeedbackDSARound:
+    """Tests for DSA round technical feedback generation."""
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_calls_technical_feedback_prompt(self):
+        """For DSA rounds, build_technical_feedback_prompt is called instead of build_feedback_prompt."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, mock_pb = make_technical_service(
+            llm_response=_make_dsa_feedback_json()
+        )
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        await service.generate_feedback_report(session)
+
+        mock_pb.build_technical_feedback_prompt.assert_called_once_with(session=session)
+        mock_pb.build_feedback_prompt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_returns_feedback_report(self):
+        """DSA round feedback generation returns a valid FeedbackReport."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(llm_response=_make_dsa_feedback_json())
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        reply_text, updated_session = await service.generate_feedback_report(session)
+
+        assert isinstance(reply_text, str)
+        assert updated_session.feedback_report is not None
+        assert isinstance(updated_session.feedback_report, FeedbackReport)
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_includes_complexity_summary_in_improvements(self):
+        """complexity_summary from LLM is folded into improvements."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(
+            llm_response=_make_dsa_feedback_json(
+                complexity_summary="Candidate consistently achieved O(n log n) solutions."
+            )
+        )
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        _, updated_session = await service.generate_feedback_report(session)
+
+        improvements_text = " ".join(updated_session.feedback_report.improvements)
+        assert "Complexity analysis" in improvements_text
+        assert "O(n log n)" in improvements_text
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_includes_problem_solving_approach_in_strengths(self):
+        """problem_solving_approach from LLM is folded into strengths."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(
+            llm_response=_make_dsa_feedback_json(
+                problem_solving_approach="Methodically breaks down problems before coding."
+            )
+        )
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        _, updated_session = await service.generate_feedback_report(session)
+
+        strengths_text = " ".join(updated_session.feedback_report.strengths)
+        assert "Problem-solving approach" in strengths_text
+        assert "Methodically" in strengths_text
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_reply_contains_dsa_label(self):
+        """DSA round reply text contains 'DSA/Coding Round' label."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(llm_response=_make_dsa_feedback_json())
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        assert "DSA/Coding Round" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_reply_contains_no_html_tags(self):
+        """DSA round reply text contains no HTML tags."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(llm_response=_make_dsa_feedback_json())
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        assert "<b>" not in reply_text
+        assert "<br>" not in reply_text
+        assert "</" not in reply_text
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_reply_contains_no_markdown_headers(self):
+        """DSA round reply text contains no markdown headers."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(llm_response=_make_dsa_feedback_json())
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        for line in reply_text.splitlines():
+            assert not line.startswith("#"), f"Markdown header found: {line!r}"
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_reply_shows_topics_covered(self):
+        """DSA round reply includes topics covered when present in session."""
+        from interview_practice_partner.domain.enums import InterviewRoundType, ProblemTopic
+
+        service, _, _ = make_technical_service(llm_response=_make_dsa_feedback_json())
+        session = make_session(
+            interview_round_type=InterviewRoundType.DSA_CODING,
+            topics_covered=[ProblemTopic.ARRAYS, ProblemTopic.TREES],
+        )
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        assert "Arrays" in reply_text
+        assert "Trees" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_reply_shows_difficulty_progression(self):
+        """DSA round reply includes difficulty adjustment history when present."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(llm_response=_make_dsa_feedback_json())
+        session = make_session(
+            interview_round_type=InterviewRoundType.DSA_CODING,
+            difficulty_adjustment_history=[
+                {"from": "medium", "to": "hard", "reason": "Optimal solution submitted"}
+            ],
+        )
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        assert "Medium" in reply_text
+        assert "Hard" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_dsa_round_fallback_on_invalid_json(self):
+        """DSA round falls back gracefully on invalid LLM JSON."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(llm_response="not valid json")
+        session = make_session(interview_round_type=InterviewRoundType.DSA_CODING)
+
+        reply_text, updated_session = await service.generate_feedback_report(session)
+
+        assert updated_session.feedback_report is not None
+        assert len(updated_session.feedback_report.strengths) >= 1
+        assert len(updated_session.feedback_report.improvements) >= 1
+
+
+# ===========================================================================
+# Technical feedback — System Design round
+# ===========================================================================
+
+
+class TestTechnicalFeedbackSystemDesignRound:
+    """Tests for System Design round technical feedback generation."""
+
+    @pytest.mark.asyncio
+    async def test_system_design_round_calls_technical_feedback_prompt(self):
+        """For System Design rounds, build_technical_feedback_prompt is called."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, mock_pb = make_technical_service(
+            llm_response=_make_system_design_feedback_json()
+        )
+        session = make_session(interview_round_type=InterviewRoundType.SYSTEM_DESIGN)
+
+        await service.generate_feedback_report(session)
+
+        mock_pb.build_technical_feedback_prompt.assert_called_once_with(session=session)
+        mock_pb.build_feedback_prompt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_system_design_round_includes_design_thinking_in_strengths(self):
+        """design_thinking from LLM is folded into strengths."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(
+            llm_response=_make_system_design_feedback_json(
+                design_thinking="Strong understanding of microservices architecture."
+            )
+        )
+        session = make_session(interview_round_type=InterviewRoundType.SYSTEM_DESIGN)
+
+        _, updated_session = await service.generate_feedback_report(session)
+
+        strengths_text = " ".join(updated_session.feedback_report.strengths)
+        assert "Design thinking" in strengths_text
+        assert "microservices" in strengths_text
+
+    @pytest.mark.asyncio
+    async def test_system_design_round_includes_scalability_awareness_in_improvements(self):
+        """scalability_awareness from LLM is folded into improvements."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(
+            llm_response=_make_system_design_feedback_json(
+                scalability_awareness="Needs more focus on horizontal scaling strategies."
+            )
+        )
+        session = make_session(interview_round_type=InterviewRoundType.SYSTEM_DESIGN)
+
+        _, updated_session = await service.generate_feedback_report(session)
+
+        improvements_text = " ".join(updated_session.feedback_report.improvements)
+        assert "Scalability awareness" in improvements_text
+        assert "horizontal scaling" in improvements_text
+
+    @pytest.mark.asyncio
+    async def test_system_design_round_reply_contains_system_design_label(self):
+        """System Design round reply text contains 'System Design Round' label."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_technical_service(
+            llm_response=_make_system_design_feedback_json()
+        )
+        session = make_session(interview_round_type=InterviewRoundType.SYSTEM_DESIGN)
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        assert "System Design Round" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_system_design_round_reply_shows_design_aspects_covered(self):
+        """System Design round reply includes design aspects covered when present."""
+        from interview_practice_partner.domain.enums import DesignAspect, InterviewRoundType
+
+        service, _, _ = make_technical_service(
+            llm_response=_make_system_design_feedback_json()
+        )
+        session = make_session(
+            interview_round_type=InterviewRoundType.SYSTEM_DESIGN,
+            design_aspects_covered=[DesignAspect.SCALABILITY, DesignAspect.API_DESIGN],
+        )
+
+        reply_text, _ = await service.generate_feedback_report(session)
+
+        assert "Scalability" in reply_text
+        assert "Api Design" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_system_design_round_fallback_on_llm_exception(self):
+        """System Design round falls back gracefully when LLM raises an exception."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = RuntimeError("LLM unavailable")
+
+        mock_pb = MagicMock()
+        mock_pb.build_technical_feedback_prompt.return_value = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "user"},
+        ]
+
+        service = FeedbackService(llm_client=mock_llm, prompt_builder=mock_pb)
+        session = make_session(interview_round_type=InterviewRoundType.SYSTEM_DESIGN)
+
+        reply_text, updated_session = await service.generate_feedback_report(session)
+
+        assert updated_session.feedback_report is not None
+        assert len(updated_session.feedback_report.strengths) >= 1
+
+
+# ===========================================================================
+# Behavioral round — unchanged behaviour
+# ===========================================================================
+
+
+class TestBehavioralRoundUnchanged:
+    """Verify behavioral round still uses the original feedback path."""
+
+    @pytest.mark.asyncio
+    async def test_behavioral_round_calls_build_feedback_prompt(self):
+        """For behavioral rounds (no round type), build_feedback_prompt is called."""
+        service, _, mock_pb = make_service(llm_response=_make_valid_feedback_json())
+        session = make_session()  # interview_round_type=None → behavioral
+
+        await service.generate_feedback_report(session)
+
+        mock_pb.build_feedback_prompt.assert_called_once_with(session=session)
+
+    @pytest.mark.asyncio
+    async def test_explicit_behavioral_round_type_calls_build_feedback_prompt(self):
+        """For explicit BEHAVIORAL round type, build_feedback_prompt is called."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, mock_pb = make_service(llm_response=_make_valid_feedback_json())
+        session = make_session(interview_round_type=InterviewRoundType.BEHAVIORAL)
+
+        await service.generate_feedback_report(session)
+
+        mock_pb.build_feedback_prompt.assert_called_once_with(session=session)
+
+    @pytest.mark.asyncio
+    async def test_behavioral_round_still_has_all_four_dimensions(self):
+        """Behavioral round still enforces all four EvaluationDimension values."""
+        from interview_practice_partner.domain.enums import InterviewRoundType
+
+        service, _, _ = make_service(llm_response=_make_valid_feedback_json())
+        session = make_session(interview_round_type=InterviewRoundType.BEHAVIORAL)
+
+        _, updated_session = await service.generate_feedback_report(session)
+
+        present = {ds.dimension for ds in updated_session.feedback_report.dimension_scores}
+        assert present == set(EvaluationDimension)

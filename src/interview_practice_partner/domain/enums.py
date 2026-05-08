@@ -6,6 +6,7 @@ from enum import Enum
 class Stage(str, Enum):
     INIT = "INIT"
     ROLE_SELECTION = "ROLE_SELECTION"
+    ROUND_TYPE_SELECTION = "ROUND_TYPE_SELECTION"
     INTERVIEW = "INTERVIEW"
     FEEDBACK = "FEEDBACK"
     COMPLETE = "COMPLETE"

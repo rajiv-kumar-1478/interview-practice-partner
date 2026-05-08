@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Optional, Protocol
 
 import structlog
 
-from interview_practice_partner.domain.enums import Role, Stage
+from interview_practice_partner.domain.enums import InterviewRoundType, Role, Stage
 from interview_practice_partner.domain.exceptions import InvalidSessionStateError
 from interview_practice_partner.domain.models import SessionState
 from interview_practice_partner.llm.client import LLMClient
@@ -254,6 +254,9 @@ class SessionService:
         elif stage == Stage.ROLE_SELECTION:
             reply, session = await self._handle_role_selection(session, user_message)
 
+        elif stage == Stage.ROUND_TYPE_SELECTION:
+            reply, session = await self._handle_round_type_selection(session, user_message)
+
         elif stage == Stage.INTERVIEW:
             reply, session = await self._handle_interview(
                 session, user_message,
@@ -292,27 +295,57 @@ class SessionService:
 
         If the opening message already contains a recognisable role we skip
         straight to INTERVIEW (Property 13 / Requirement 6.1).
+        For SOFTWARE_ENGINEER, we go to ROUND_TYPE_SELECTION instead.
         """
         session.stage = Stage.ROLE_SELECTION
         session.clarification_turn_count = 0
 
-        # Fast-path: role present in opening message → go straight to INTERVIEW
+        # Fast-path: role present in opening message → go straight to INTERVIEW (or ROUND_TYPE_SELECTION)
         detected_role = _detect_role_in_message(user_message)
         if detected_role != Role.UNKNOWN:
             session.role = detected_role
-            session.stage = Stage.INTERVIEW
             logger.info(
                 "fast_path_role_detected",
                 role=detected_role.value,
                 session_id=session.session_id,
             )
-            question_text = await self._interview.generate_question(session)
-            role_display = detected_role.value.replace("_", " ").title()
-            reply = (
-                f"Great, let's practise for a *{role_display}* interview!\n\n"
-                f"{question_text}"
-            )
-            return reply, session
+
+            if detected_role == Role.SOFTWARE_ENGINEER:
+                # Check if round type is also in the opening message (fast-path)
+                from interview_practice_partner.services.interview import _detect_round_type
+                detected_round_type = _detect_round_type(user_message)
+                if detected_round_type is not None:
+                    # Fast-path: role + round type in opening message
+                    session.interview_round_type = detected_round_type
+                    session.stage = Stage.INTERVIEW
+                    question_text = await self._interview.generate_question(session)
+                    role_display = detected_role.value.replace("_", " ").title()
+                    reply = (
+                        f"Great, let's practise for a *{role_display}* interview!\n\n"
+                        f"{question_text}"
+                    )
+                else:
+                    # Go to ROUND_TYPE_SELECTION
+                    session.stage = Stage.ROUND_TYPE_SELECTION
+                    role_display = detected_role.value.replace("_", " ").title()
+                    reply = (
+                        f"Great, let's practise for a *{role_display}* interview!\n\n"
+                        "Which interview round would you like to practice?\n\n"
+                        "1. *DSA/Coding Round* - Practice algorithmic problem-solving\n"
+                        "2. *System Design Round* - Practice architectural design\n"
+                        "3. *Behavioral Round* - Practice soft skills and experience questions\n\n"
+                        "Please reply with the number or name of the round type."
+                    )
+                return reply, session
+            else:
+                session.stage = Stage.INTERVIEW
+                question_text = await self._interview.generate_question(session)
+                role_display = detected_role.value.replace("_", " ").title()
+                reply = (
+                    f"Great, let's practise for a *{role_display}* interview!\n\n"
+                    f"{question_text}"
+                )
+                return reply, session
 
         # Normal path: ask for role
         messages = self._prompt_builder.build_role_selection_prompt(
@@ -339,20 +372,32 @@ class SessionService:
             # Try one last time to detect a role in this message
             detected_role = _detect_role_in_message(user_message)
             if detected_role != Role.UNKNOWN:
-                # Role found at timeout — use it and transition to INTERVIEW
+                # Role found at timeout — use it and transition appropriately
                 session.role = detected_role
-                session.stage = Stage.INTERVIEW
                 logger.info(
                     "clarification_timeout_role_detected",
                     role=detected_role.value,
                     session_id=session.session_id,
                 )
-                question_text = await self._interview.generate_question(session)
-                role_display = detected_role.value.replace("_", " ").title()
-                reply = (
-                    f"Great, let's practise for a *{role_display}* interview!\n\n"
-                    f"{question_text}"
-                )
+                if detected_role == Role.SOFTWARE_ENGINEER:
+                    session.stage = Stage.ROUND_TYPE_SELECTION
+                    role_display = detected_role.value.replace("_", " ").title()
+                    reply = (
+                        f"Great, let's practise for a *{role_display}* interview!\n\n"
+                        "Which interview round would you like to practice?\n\n"
+                        "1. *DSA/Coding Round* - Practice algorithmic problem-solving\n"
+                        "2. *System Design Round* - Practice architectural design\n"
+                        "3. *Behavioral Round* - Practice soft skills and experience questions\n\n"
+                        "Please reply with the number or name of the round type."
+                    )
+                else:
+                    session.stage = Stage.INTERVIEW
+                    question_text = await self._interview.generate_question(session)
+                    role_display = detected_role.value.replace("_", " ").title()
+                    reply = (
+                        f"Great, let's practise for a *{role_display}* interview!\n\n"
+                        f"{question_text}"
+                    )
                 return reply, session
             else:
                 # Timeout: proceed with general format
@@ -379,22 +424,52 @@ class SessionService:
         role, reply = self._parse_role_selection_response(raw)
 
         if role != Role.UNKNOWN:
-            # Role confirmed → transition to INTERVIEW
+            # Role confirmed → transition to INTERVIEW (or ROUND_TYPE_SELECTION for SWE)
             session.role = role
-            session.stage = Stage.INTERVIEW
             logger.info(
                 "role_confirmed",
                 role=role.value,
                 session_id=session.session_id,
             )
-            question_text = await self._interview.generate_question(session)
-            role_display = role.value.replace("_", " ").title()
-            reply = (
-                f"Perfect! Let's begin your *{role_display}* mock interview.\n\n"
-                f"{question_text}"
-            )
+
+            if role == Role.SOFTWARE_ENGINEER:
+                # Go to ROUND_TYPE_SELECTION for Software Engineer
+                session.stage = Stage.ROUND_TYPE_SELECTION
+                role_display = role.value.replace("_", " ").title()
+                reply = (
+                    f"Perfect! Let's begin your *{role_display}* mock interview.\n\n"
+                    "Which interview round would you like to practice?\n\n"
+                    "1. *DSA/Coding Round* - Practice algorithmic problem-solving\n"
+                    "2. *System Design Round* - Practice architectural design\n"
+                    "3. *Behavioral Round* - Practice soft skills and experience questions\n\n"
+                    "Please reply with the number or name of the round type."
+                )
+            else:
+                session.stage = Stage.INTERVIEW
+                question_text = await self._interview.generate_question(session)
+                role_display = role.value.replace("_", " ").title()
+                reply = (
+                    f"Perfect! Let's begin your *{role_display}* mock interview.\n\n"
+                    f"{question_text}"
+                )
         # else: stay in ROLE_SELECTION, reply is the clarification message from LLM
 
+        return reply, session
+
+    async def _handle_round_type_selection(
+        self, session: SessionState, user_message: str
+    ) -> tuple[str, SessionState]:
+        """ROUND_TYPE_SELECTION → INTERVIEW once a round type is confirmed.
+
+        Delegates to InterviewService.handle_round_type_selection which
+        detects the round type from the user's message and generates the
+        first question.
+        """
+        reply, session = await self._interview.handle_response(session, user_message)
+        # If round type was detected, InterviewService sets interview_round_type
+        # and advances to INTERVIEW stage
+        if session.interview_round_type is not None:
+            session.stage = Stage.INTERVIEW
         return reply, session
 
     async def _handle_interview(

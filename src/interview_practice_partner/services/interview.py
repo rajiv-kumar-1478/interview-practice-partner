@@ -224,6 +224,25 @@ def _is_dont_know(message: str) -> bool:
     return any(phrase in lower for phrase in dont_know_phrases)
 
 
+def _is_solution_request(message: str) -> bool:
+    """Return True if the message is explicitly requesting the solution/answer.
+
+    Distinct from a general skip — the user specifically wants to see the
+    solution so we should provide it (Req 14.4).
+    """
+    lower = message.lower().strip()
+    solution_phrases = frozenset([
+        "give me solution", "give me the solution",
+        "give me the answer", "give me answer",
+        "tell me the answer", "tell me answer",
+        "what's the answer", "what is the answer",
+        "show me the solution", "show solution",
+        "reveal solution", "reveal the solution",
+        "what's the solution", "what is the solution",
+    ])
+    return any(phrase in lower for phrase in solution_phrases)
+
+
 def _is_audio_media(media_content_type: Optional[str]) -> bool:
     """Return True if the media content type indicates an audio file."""
     if not media_content_type:
@@ -594,6 +613,65 @@ class InterviewService:
         )
 
     # ------------------------------------------------------------------
+    # Empty/whitespace submission handling
+    # ------------------------------------------------------------------
+
+    def handle_empty_submission(self, session: SessionState) -> str:
+        """Return a prompt when the user submits an empty or whitespace-only message.
+
+        For technical rounds (Req 14.5): prompts the user to provide their
+        approach or skip the problem.  For other contexts, returns a generic
+        prompt.
+
+        Also increments ``consecutive_out_of_scope_count`` so that repeated
+        empty submissions eventually trigger the skip/end offer (Req 14.7).
+
+        Args:
+            session: The current ``SessionState`` (mutated in-place).
+
+        Returns:
+            A prompt string asking the user to provide their approach or skip.
+        """
+        session.off_topic_count += 1
+        session.consecutive_out_of_scope_count += 1
+
+        log = logger.bind(
+            session_id=session.session_id,
+            consecutive_out_of_scope_count=session.consecutive_out_of_scope_count,
+        )
+        log.info("empty_submission_detected")
+
+        round_type = session.interview_round_type
+        is_technical = round_type in (
+            InterviewRoundType.DSA_CODING,
+            InterviewRoundType.SYSTEM_DESIGN,
+        )
+
+        # Req 14.7: After 3+ consecutive invalid responses, offer to skip or end
+        if session.consecutive_out_of_scope_count >= 3:
+            if is_technical:
+                return (
+                    "It looks like we've had a few empty submissions. "
+                    "Would you like to:\n\n"
+                    "1. *Skip* the current problem and try a different one\n"
+                    "2. *End the session* and receive your feedback so far\n"
+                    "3. *Continue* with the current problem\n\n"
+                    "Please reply with *1*, *2*, or *3*."
+                )
+
+        # Req 14.5: Prompt to provide approach or skip
+        if is_technical:
+            return (
+                "It looks like your message was empty. "
+                "Please share your approach or solution, or reply *skip* to move on to the next problem."
+            )
+
+        return (
+            "It looks like your message was empty. "
+            "Please provide your answer or reply *skip* to move on."
+        )
+
+    # ------------------------------------------------------------------
     # Off-topic handling
     # ------------------------------------------------------------------
 
@@ -603,6 +681,11 @@ class InterviewService:
         Increments ``off_topic_count`` and ``consecutive_out_of_scope_count``.
         After 3 or more consecutive out-of-scope inputs, offers to end the
         session or return to role selection.
+
+        For technical rounds (Req 14.2, 14.6): redirects the user back to the
+        current problem and asks them to re-read it.
+        For technical rounds (Req 14.7): After 3+ consecutive off-topic/invalid
+        responses, offers to skip the current problem or end the session.
 
         Args:
             session: The current ``SessionState`` (mutated in-place).
@@ -621,20 +704,76 @@ class InterviewService:
         log.info("off_topic_response_detected")
 
         if session.consecutive_out_of_scope_count >= 3:
-            # Offer to end session or return to role selection
-            return (
-                "It looks like we've gone off track a few times. "
-                "Would you like to:\n"
-                "1. End the session and receive your feedback so far\n"
-                "2. Return to role selection and start a new session\n\n"
-                "Please reply with *1* or *2*, or send your answer to continue the interview."
+            # Check if we're in a technical round
+            round_type = session.interview_round_type
+            is_technical = round_type in (
+                InterviewRoundType.DSA_CODING,
+                InterviewRoundType.SYSTEM_DESIGN,
             )
 
-        # Standard redirect
+            if is_technical:
+                # Req 14.7: Offer to skip the current problem or end the session
+                return (
+                    "It looks like we've gone off track a few times. "
+                    "Would you like to:\n\n"
+                    "1. *Skip* the current problem and try a different one\n"
+                    "2. *End the session* and receive your feedback so far\n"
+                    "3. *Continue* with the current problem\n\n"
+                    "Please reply with *1*, *2*, or *3*."
+                )
+            else:
+                # Behavioral round: offer to end session or return to role selection
+                return (
+                    "It looks like we've gone off track a few times. "
+                    "Would you like to:\n"
+                    "1. End the session and receive your feedback so far\n"
+                    "2. Return to role selection and start a new session\n\n"
+                    "Please reply with *1* or *2*, or send your answer to continue the interview."
+                )
+
+        # Check if we're in a technical round for a more specific redirect
+        round_type = session.interview_round_type
+        is_technical = round_type in (
+            InterviewRoundType.DSA_CODING,
+            InterviewRoundType.SYSTEM_DESIGN,
+        )
+
+        if is_technical:
+            # Req 14.2 & 14.6: Ask user to re-read the problem and redirect back
+            current_problem_text = self._get_current_problem_text(session)
+            if current_problem_text:
+                return (
+                    "That response doesn't seem related to the current problem. "
+                    "Please re-read the problem and try again:\n\n"
+                    f"{current_problem_text}"
+                )
+            return (
+                "That response doesn't seem related to the current problem. "
+                "Please re-read the problem and try again, "
+                "or reply *skip* to move on to a different problem."
+            )
+
+        # Standard redirect for behavioral rounds
         return (
             "That response doesn't seem to be related to the interview question. "
             "Let's keep focused on the interview — please try to answer the question asked."
         )
+
+    @staticmethod
+    def _get_current_problem_text(session: SessionState) -> Optional[str]:
+        """Return the text of the current unanswered question, or None.
+
+        Args:
+            session: The current ``SessionState``.
+
+        Returns:
+            The question text string, or ``None`` if no active question found.
+        """
+        answered_ids = {r.question_id for r in session.responses}
+        for q in reversed(session.questions):
+            if not q.skipped and q.question_id not in answered_ids:
+                return q.text
+        return None
 
     # ------------------------------------------------------------------
     # Skip handling
@@ -647,9 +786,13 @@ class InterviewService:
     ) -> tuple[str, SessionState]:
         """Mark the current question as skipped and advance to the next question.
 
-        Finds the most recent unanswered question in the session, marks it as
-        skipped, generates the next question, and returns an acknowledgement
-        message.
+        For technical rounds (DSA/System Design):
+        - Tracks consecutive skips; decreases difficulty after 2 consecutive skips (Req 15.3)
+        - When user requests the solution, provides it with explanation (Req 14.4)
+        - After 3 consecutive skips, offers to end the session (Req 14.7)
+
+        For behavioral rounds:
+        - Marks question as skipped and generates the next question.
 
         Args:
             session: The current ``SessionState`` (mutated in-place).
@@ -674,7 +817,17 @@ class InterviewService:
                 question_id=current_question.question_id,
             )
 
-        # Generate the next question
+        # Handle technical rounds differently
+        round_type = session.interview_round_type
+        is_technical = round_type in (
+            InterviewRoundType.DSA_CODING,
+            InterviewRoundType.SYSTEM_DESIGN,
+        )
+
+        if is_technical:
+            return await self._handle_technical_skip(session, current_question, user_message)
+
+        # Behavioral round: generate the next question
         next_question_text = await self.generate_question(session)
 
         # Tailor the acknowledgement based on why they skipped
@@ -689,6 +842,174 @@ class InterviewService:
 
         reply = f"{preamble}{next_question_text}"
         return reply, session
+
+    async def _handle_technical_skip(
+        self,
+        session: SessionState,
+        current_question,
+        user_message: str,
+    ) -> tuple[str, SessionState]:
+        """Handle skip requests during DSA/System Design rounds.
+
+        Tracks consecutive skips, decreases difficulty after 2 consecutive
+        skips (Req 15.3), provides solution when requested (Req 14.4), and
+        offers to end the session after 3 consecutive skips (Req 14.7).
+
+        Args:
+            session: The current ``SessionState`` (mutated in-place).
+            current_question: The question that was just skipped (may be None).
+            user_message: The original user message.
+
+        Returns:
+            A ``(reply_text, updated_session)`` tuple.
+        """
+        # Increment consecutive skip counter
+        session.consecutive_skips_count += 1
+
+        log = logger.bind(
+            session_id=session.session_id,
+            consecutive_skips=session.consecutive_skips_count,
+            round_type=session.interview_round_type.value if session.interview_round_type else None,
+        )
+        log.info("technical_skip_detected")
+
+        # Req 14.7: After 3 consecutive skips, offer to end the session
+        if session.consecutive_skips_count >= 3:
+            log.info("consecutive_skip_limit_reached")
+            return (
+                "It looks like you've skipped a few problems in a row. "
+                "Would you like to:\n\n"
+                "1. *End the session* and receive your feedback so far\n"
+                "2. *Continue* with a new problem\n\n"
+                "Please reply with *1* to end or *2* to continue.",
+                session,
+            )
+
+        # Req 15.3: Decrease difficulty after 2 consecutive skips
+        if session.consecutive_skips_count >= 2:
+            old_difficulty = session.problem_difficulty
+            if old_difficulty == ProblemDifficulty.HARD:
+                session.problem_difficulty = ProblemDifficulty.MEDIUM
+            elif old_difficulty == ProblemDifficulty.MEDIUM:
+                session.problem_difficulty = ProblemDifficulty.EASY
+            # (already EASY — stays at EASY)
+
+            if session.problem_difficulty != old_difficulty:
+                session.difficulty_adjustment_history.append({
+                    "from": old_difficulty.value,
+                    "to": session.problem_difficulty.value,
+                    "reason": "consecutive_skips",
+                    "timestamp": _now().isoformat(),
+                })
+                log.info(
+                    "difficulty_decreased_after_consecutive_skips",
+                    old_difficulty=old_difficulty.value,
+                    new_difficulty=session.problem_difficulty.value,
+                )
+
+        # Req 14.4: If user requested the solution, provide it via LLM
+        solution_requested = _is_solution_request(user_message)
+
+        if (solution_requested and
+                current_question is not None and
+                session.interview_round_type == InterviewRoundType.DSA_CODING and
+                self._technical_round_service is not None):
+            # Generate solution explanation via LLM
+            solution_text = await self._get_problem_solution(session, current_question)
+            preamble = (
+                "No problem — here's the solution with explanation:\n\n"
+                f"{solution_text}\n\n"
+            )
+        elif _is_dont_know(user_message):
+            preamble = (
+                "No worries — that's a tricky one. "
+                "In a real interview, it helps to think out loud and break the problem down. "
+                "Let's try a different problem.\n\n"
+            )
+        else:
+            preamble = "No problem — we'll skip that one.\n\n"
+
+        # Generate next technical problem/question
+        if session.interview_round_type == InterviewRoundType.DSA_CODING:
+            if self._technical_round_service is not None:
+                next_problem = await self._technical_round_service.generate_coding_problem(
+                    session, session.problem_difficulty
+                )
+                from interview_practice_partner.domain.models import CodingProblem
+                next_question = Question(
+                    question_id=next_problem.problem_id,
+                    text=next_problem.text,
+                    question_type=QuestionType.TECHNICAL,
+                    asked_at=next_problem.asked_at,
+                )
+                session.questions.append(next_question)
+                next_text = next_problem.text
+                if next_problem.examples:
+                    next_text += "\n\n*Examples:*\n" + "\n".join(next_problem.examples)
+                if next_problem.constraints:
+                    next_text += f"\n\n*Constraints:* {next_problem.constraints}"
+            else:
+                next_text = await self.generate_question(session)
+        else:
+            # System Design round
+            if self._technical_round_service is not None:
+                next_design_q = await self._technical_round_service.generate_system_design_question(
+                    session
+                )
+                next_question = Question(
+                    question_id=next_design_q.question_id,
+                    text=next_design_q.text,
+                    question_type=QuestionType.TECHNICAL,
+                    asked_at=next_design_q.asked_at,
+                )
+                session.questions.append(next_question)
+                next_text = f"{next_design_q.text}\n\n{next_design_q.description}"
+            else:
+                next_text = await self.generate_question(session)
+
+        difficulty_note = ""
+        if session.consecutive_skips_count >= 2:
+            difficulty_note = (
+                f"_(Difficulty adjusted to *{session.problem_difficulty.value.capitalize()}*)_\n\n"
+            )
+
+        reply = f"{preamble}{difficulty_note}{next_text}"
+        return reply, session
+
+    async def _get_problem_solution(
+        self,
+        session: SessionState,
+        current_question,
+    ) -> str:
+        """Generate a solution explanation for the current DSA problem via LLM.
+
+        Falls back to a generic message if the LLM call fails.
+
+        Args:
+            session: The current ``SessionState``.
+            current_question: The ``Question`` that was skipped.
+
+        Returns:
+            A solution explanation string.
+        """
+        try:
+            messages = self._prompt_builder.build_problem_solution_prompt(
+                problem_text=current_question.text,
+                difficulty=session.problem_difficulty,
+            )
+            solution = await self._llm.complete(messages, temperature=0.3)
+            return solution.strip()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "problem_solution_generation_failed",
+                session_id=session.session_id,
+                question_id=current_question.question_id,
+            )
+            return (
+                "I wasn't able to generate the full solution right now, "
+                "but the key approach for this type of problem is to break it down "
+                "into smaller subproblems and consider edge cases carefully."
+            )
 
     # ------------------------------------------------------------------
     # Round type selection handling (Software Engineer only)
@@ -731,6 +1052,12 @@ class InterviewService:
             if detected_type == InterviewRoundType.DSA_CODING:
                 # Initialize DSA round
                 session.problem_difficulty = ProblemDifficulty.MEDIUM
+                log.info(
+                    "technical_round_started",
+                    session_id=session.session_id,
+                    round_type=detected_type.value,
+                    initial_difficulty=session.problem_difficulty.value,
+                )
                 if self._technical_round_service is None:
                     # Fallback to behavioral if technical service not available
                     session.interview_round_type = InterviewRoundType.BEHAVIORAL
@@ -762,6 +1089,12 @@ class InterviewService:
 
             elif detected_type == InterviewRoundType.SYSTEM_DESIGN:
                 # Initialize System Design round
+                log.info(
+                    "technical_round_started",
+                    session_id=session.session_id,
+                    round_type=detected_type.value,
+                    initial_difficulty=None,
+                )
                 if self._technical_round_service is None:
                     # Fallback to behavioral if technical service not available
                     session.interview_round_type = InterviewRoundType.BEHAVIORAL
@@ -1046,6 +1379,7 @@ class InterviewService:
         1. Check for mode command → call ``handle_mode_command``
         2. Check for voice note → call ``handle_voice_note``
         3. If text message: set ``session.preferred_mode = "text"`` silently
+        3b. Check for empty/whitespace-only submission → call ``handle_empty_submission``
         4. Check for round type selection (Software Engineer only)
         5. Check for skip keyword → call ``handle_skip``
         6. Create a ``UserResponse`` and evaluate it via LLM
@@ -1091,14 +1425,55 @@ class InterviewService:
         if not _from_voice_note:
             session.preferred_mode = "text"
 
+        # 3b. Check for empty or whitespace-only submission (Req 14.5)
+        # Only intercept for technical rounds; non-technical rounds fall through
+        # to the existing short-response handling path.
+        if not user_message.strip():
+            round_type = session.interview_round_type
+            is_technical = round_type in (
+                InterviewRoundType.DSA_CODING,
+                InterviewRoundType.SYSTEM_DESIGN,
+            )
+            if is_technical:
+                log.info("empty_submission_detected")
+                reply = self.handle_empty_submission(session)
+                return reply, session
+
         # 4. Check for round type selection (Software Engineer only, no round type set yet)
         from interview_practice_partner.domain.enums import Role
-        if (session.role == Role.SOFTWARE_ENGINEER and 
-            session.interview_round_type is None and 
-            len(session.questions) == 0):
-            # This is the first message after role selection for Software Engineer
-            # Prompt for round type selection or detect it
+        if (session.role == Role.SOFTWARE_ENGINEER and
+                session.interview_round_type is None):
+            # In ROUND_TYPE_SELECTION stage — prompt for or detect round type
             return await self.handle_round_type_selection(session, user_message)
+
+        # 4b. Check for round type switching mid-session (INTERVIEW stage)
+        if (session.role == Role.SOFTWARE_ENGINEER and
+                session.interview_round_type is not None and
+                len(session.questions) > 0):
+            detected_new_type = _detect_round_type(user_message)
+            if (detected_new_type is not None and
+                    detected_new_type != session.interview_round_type):
+                # User wants to switch round type — confirm and restart
+                log.info(
+                    "round_type_switch_requested",
+                    current_type=session.interview_round_type.value,
+                    new_type=detected_new_type.value,
+                )
+                old_type = session.interview_round_type
+                # Reset session for new round type
+                session.interview_round_type = None
+                session.questions = []
+                session.responses = []
+                session.off_topic_count = 0
+                session.consecutive_out_of_scope_count = 0
+                session.consecutive_skips_count = 0
+                session.difficulty_adjustment_history = []
+                session.topics_covered = []
+                session.design_aspects_covered = []
+                session.design_phase = None
+                session.problem_difficulty = ProblemDifficulty.MEDIUM
+                # Now handle the new round type selection
+                return await self.handle_round_type_selection(session, user_message)
 
         # 5. Classify intent via LLM — handles skip, repeat, out_of_scope, answer
         intent = await self.classify_intent(session, user_message)
@@ -1132,7 +1507,18 @@ class InterviewService:
             reply = self.handle_short_response(session)
             return reply, session
 
-        # 8. Evaluate the response via LLM
+        # 8. Route to appropriate evaluation based on round type
+        round_type = session.interview_round_type
+
+        if (round_type == InterviewRoundType.DSA_CODING and
+                self._technical_round_service is not None):
+            return await self._handle_dsa_response(session, response, log)
+
+        if (round_type == InterviewRoundType.SYSTEM_DESIGN and
+                self._technical_round_service is not None):
+            return await self._handle_system_design_response(session, response, log)
+
+        # BEHAVIORAL (or no round type set) — use existing behavioral evaluation
         evaluation = await self.evaluate_response(session, response)
 
         # Update response with evaluation results
@@ -1148,6 +1534,8 @@ class InterviewService:
 
         # Reset consecutive out-of-scope count on a valid on-topic response
         session.consecutive_out_of_scope_count = 0
+        # Reset consecutive skips count on a valid answer
+        session.consecutive_skips_count = 0
 
         difficulty_signal = evaluation.get("difficulty_signal", "maintain")
         follow_up_warranted = evaluation.get("follow_up_warranted", False)
@@ -1182,6 +1570,220 @@ class InterviewService:
             )
 
         log.info("handle_response_complete", reply_length=len(reply))
+        return reply, session
+
+    # ------------------------------------------------------------------
+    # Technical round response handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_dsa_response(
+        self,
+        session: SessionState,
+        response: UserResponse,
+        log,
+    ) -> tuple[str, SessionState]:
+        """Handle a DSA/Coding round response by routing to TechnicalRoundService.
+
+        Reconstructs a CodingProblem from the current question, calls
+        evaluate_coding_solution, adjusts difficulty, and generates the
+        next problem or follow-up.
+
+        Args:
+            session: The current ``SessionState``.
+            response: The ``UserResponse`` to evaluate.
+            log: Bound structlog logger.
+
+        Returns:
+            A ``(reply_text, updated_session)`` tuple.
+        """
+        from interview_practice_partner.domain.models import CodingProblem
+        from interview_practice_partner.domain.enums import ProblemTopic
+
+        # Reconstruct a CodingProblem from the current question
+        current_question_id = response.question_id
+        current_question = next(
+            (q for q in session.questions if q.question_id == current_question_id),
+            session.questions[-1] if session.questions else None,
+        )
+
+        if current_question is None:
+            log.warning("dsa_response_no_current_question")
+            return "I couldn't find the current problem. Please send any message to continue.", session
+
+        problem = CodingProblem(
+            problem_id=current_question.question_id,
+            text=current_question.text,
+            difficulty=session.problem_difficulty,
+            topic=ProblemTopic.ARRAYS,  # Default; actual topic not stored in Question
+            constraints="",
+            examples=[],
+            asked_at=current_question.asked_at,
+        )
+
+        log.info("routing_to_technical_round_service", round_type="dsa_coding")
+
+        # Evaluate the coding solution
+        technical_eval = await self._technical_round_service.evaluate_coding_solution(
+            session, problem, response
+        )
+
+        # Record the response
+        session.responses.append(response)
+        session.consecutive_out_of_scope_count = 0
+        # Reset consecutive skips count on a valid answer
+        session.consecutive_skips_count = 0
+
+        # Adjust difficulty based on evaluation
+        new_difficulty = self._technical_round_service.adjust_difficulty(session, technical_eval)
+        session.problem_difficulty = new_difficulty
+
+        log.info(
+            "dsa_solution_evaluated",
+            correctness=technical_eval.correctness,
+            difficulty_signal=technical_eval.difficulty_signal,
+            new_difficulty=new_difficulty.value,
+        )
+
+        # Build reply from technical evaluation
+        if technical_eval.follow_up_warranted and technical_eval.follow_up_text:
+            # Ask follow-up question
+            follow_up_question = Question(
+                question_id=str(uuid.uuid4()),
+                text=technical_eval.follow_up_text,
+                question_type=QuestionType.FOLLOW_UP,
+                asked_at=_now(),
+            )
+            session.questions.append(follow_up_question)
+            reply = f"Good attempt! Let me follow up:\n\n{technical_eval.follow_up_text}"
+        else:
+            # Generate next DSA problem
+            next_problem = await self._technical_round_service.generate_coding_problem(
+                session, new_difficulty
+            )
+            next_question = Question(
+                question_id=next_problem.problem_id,
+                text=next_problem.text,
+                question_type=QuestionType.TECHNICAL,
+                asked_at=next_problem.asked_at,
+            )
+            session.questions.append(next_question)
+
+            # Build feedback summary
+            correctness = technical_eval.correctness or "partial"
+            complexity_info = ""
+            if technical_eval.complexity_analysis:
+                ca = technical_eval.complexity_analysis
+                complexity_info = (
+                    f"\n*Time:* {ca.time_complexity} | *Space:* {ca.space_complexity}"
+                )
+
+            reply = (
+                f"*Evaluation:* {correctness.capitalize()}{complexity_info}\n\n"
+                f"Here's your next problem:\n\n"
+                f"{next_problem.text}"
+            )
+            if next_problem.examples:
+                reply += "\n\n*Examples:*\n" + "\n".join(next_problem.examples)
+            if next_problem.constraints:
+                reply += f"\n\n*Constraints:* {next_problem.constraints}"
+
+        return reply, session
+
+    async def _handle_system_design_response(
+        self,
+        session: SessionState,
+        response: UserResponse,
+        log,
+    ) -> tuple[str, SessionState]:
+        """Handle a System Design round response by routing to TechnicalRoundService.
+
+        Reconstructs a SystemDesignQuestion from the current question, calls
+        evaluate_system_design, and generates a follow-up or next question.
+
+        Args:
+            session: The current ``SessionState``.
+            response: The ``UserResponse`` to evaluate.
+            log: Bound structlog logger.
+
+        Returns:
+            A ``(reply_text, updated_session)`` tuple.
+        """
+        from interview_practice_partner.domain.models import SystemDesignQuestion
+
+        # Reconstruct a SystemDesignQuestion from the current question
+        current_question_id = response.question_id
+        current_question = next(
+            (q for q in session.questions if q.question_id == current_question_id),
+            session.questions[-1] if session.questions else None,
+        )
+
+        if current_question is None:
+            log.warning("system_design_response_no_current_question")
+            return "I couldn't find the current question. Please send any message to continue.", session
+
+        design_question = SystemDesignQuestion(
+            question_id=current_question.question_id,
+            text=current_question.text,
+            system_name="System",  # Actual name not stored in Question
+            description="",
+            asked_at=current_question.asked_at,
+        )
+
+        log.info("routing_to_technical_round_service", round_type="system_design")
+
+        # Evaluate the system design response
+        technical_eval = await self._technical_round_service.evaluate_system_design(
+            session, design_question, response
+        )
+
+        # Record the response
+        session.responses.append(response)
+        session.consecutive_out_of_scope_count = 0
+        # Reset consecutive skips count on a valid answer
+        session.consecutive_skips_count = 0
+
+        log.info(
+            "system_design_evaluated",
+            follow_up_warranted=technical_eval.follow_up_warranted,
+            aspects_count=len(technical_eval.design_aspects_evaluated),
+        )
+
+        # Build reply from technical evaluation
+        if technical_eval.follow_up_warranted and technical_eval.follow_up_text:
+            # Ask follow-up question
+            follow_up_question = Question(
+                question_id=str(uuid.uuid4()),
+                text=technical_eval.follow_up_text,
+                question_type=QuestionType.FOLLOW_UP,
+                asked_at=_now(),
+            )
+            session.questions.append(follow_up_question)
+            reply = f"Good thinking! Let me probe deeper:\n\n{technical_eval.follow_up_text}"
+        else:
+            # Generate next system design question
+            next_design_question = await self._technical_round_service.generate_system_design_question(
+                session
+            )
+            next_question = Question(
+                question_id=next_design_question.question_id,
+                text=next_design_question.text,
+                question_type=QuestionType.TECHNICAL,
+                asked_at=next_design_question.asked_at,
+            )
+            session.questions.append(next_question)
+
+            # Build feedback summary
+            strengths_text = ""
+            if technical_eval.design_strengths:
+                strengths_text = "\n*Strengths:* " + ", ".join(technical_eval.design_strengths[:2])
+
+            reply = (
+                f"Good response!{strengths_text}\n\n"
+                f"Let's move on to the next design challenge:\n\n"
+                f"{next_design_question.text}\n\n"
+                f"{next_design_question.description}"
+            )
+
         return reply, session
 
     # ------------------------------------------------------------------

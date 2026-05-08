@@ -194,9 +194,11 @@ async def test_property_13_role_in_opening_message_transitions_to_interview(
 
     reply, updated_session = await service.transition(session, opening_message)
 
-    # The session must transition directly to INTERVIEW (not ROLE_SELECTION)
-    assert updated_session.stage == Stage.INTERVIEW, (
-        f"Expected session to transition to INTERVIEW for opening message "
+    # The session must transition directly to INTERVIEW or ROUND_TYPE_SELECTION (not ROLE_SELECTION)
+    # For SOFTWARE_ENGINEER: goes to ROUND_TYPE_SELECTION first
+    # For other roles: goes directly to INTERVIEW
+    assert updated_session.stage in (Stage.INTERVIEW, Stage.ROUND_TYPE_SELECTION), (
+        f"Expected session to transition to INTERVIEW or ROUND_TYPE_SELECTION for opening message "
         f"{opening_message!r} (role: {expected_role.value}), "
         f"but got stage {updated_session.stage!r}"
     )
@@ -295,12 +297,27 @@ async def test_property_13_reply_contains_interview_question(
         "Expected a non-empty reply for an opening message with a role."
     )
 
-    # The reply must contain the interview question text
-    # (our mock returns _SAMPLE_INTERVIEW_QUESTION)
-    assert _SAMPLE_INTERVIEW_QUESTION in reply, (
-        f"Expected reply to contain the interview question for opening message "
-        f"{opening_message!r}, but got: {reply!r}"
-    )
+    # For SOFTWARE_ENGINEER: reply contains round type selection menu OR interview question
+    # (if the message also contained a round type keyword, it goes directly to INTERVIEW)
+    if expected_role == Role.SOFTWARE_ENGINEER:
+        if updated_session.stage == Stage.ROUND_TYPE_SELECTION:
+            # Should contain round type selection options
+            assert any(phrase in reply.lower() for phrase in ["dsa", "system design", "behavioral", "round", "which"]), (
+                f"Expected reply to contain round type selection for SOFTWARE_ENGINEER, "
+                f"but got: {reply!r}"
+            )
+        else:
+            # Fast-path with round type in message: should contain interview question
+            assert isinstance(reply, str) and len(reply.strip()) > 0, (
+                f"Expected non-empty reply for SOFTWARE_ENGINEER fast-path, got: {reply!r}"
+            )
+    else:
+        # The reply must contain the interview question text
+        # (our mock returns _SAMPLE_INTERVIEW_QUESTION)
+        assert _SAMPLE_INTERVIEW_QUESTION in reply, (
+            f"Expected reply to contain the interview question for opening message "
+            f"{opening_message!r}, but got: {reply!r}"
+        )
 
     # The reply must NOT be a role clarification prompt
     # (i.e., it should not ask the user to specify a role)
@@ -356,22 +373,30 @@ async def test_property_13_fast_path_works_for_all_supported_roles(
 
     reply, updated_session = await service.transition(session, opening_message)
 
-    # Must transition directly to INTERVIEW
-    assert updated_session.stage == Stage.INTERVIEW, (
-        f"Expected INTERVIEW stage for role {role.value!r} with message "
-        f"{opening_message!r}, but got {updated_session.stage!r}"
-    )
+    # Must transition directly to INTERVIEW or ROUND_TYPE_SELECTION (not ROLE_SELECTION)
+    # For SOFTWARE_ENGINEER: goes to ROUND_TYPE_SELECTION first
+    # For other roles: goes directly to INTERVIEW
+    if role == Role.SOFTWARE_ENGINEER:
+        assert updated_session.stage == Stage.ROUND_TYPE_SELECTION, (
+            f"Expected ROUND_TYPE_SELECTION stage for SOFTWARE_ENGINEER with message "
+            f"{opening_message!r}, but got {updated_session.stage!r}"
+        )
+    else:
+        assert updated_session.stage == Stage.INTERVIEW, (
+            f"Expected INTERVIEW stage for role {role.value!r} with message "
+            f"{opening_message!r}, but got {updated_session.stage!r}"
+        )
 
     # Role must be set correctly
     assert updated_session.role == role, (
         f"Expected role {role.value!r} but got {updated_session.role.value!r}"
     )
 
-    # Reply must contain the interview question
-    assert _SAMPLE_INTERVIEW_QUESTION in reply, (
-        f"Expected reply to contain interview question for role {role.value!r}, "
-        f"but got: {reply!r}"
-    )
-
-    # generate_question must have been called (fast path invokes it)
-    service._interview.generate_question.assert_called()
+    # For non-SWE roles: reply must contain the interview question
+    if role != Role.SOFTWARE_ENGINEER:
+        assert _SAMPLE_INTERVIEW_QUESTION in reply, (
+            f"Expected reply to contain interview question for role {role.value!r}, "
+            f"but got: {reply!r}"
+        )
+        # generate_question must have been called (fast path invokes it)
+        service._interview.generate_question.assert_called()

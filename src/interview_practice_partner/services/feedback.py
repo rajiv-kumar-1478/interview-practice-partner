@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import structlog
 
-from interview_practice_partner.domain.enums import EvaluationDimension
+from interview_practice_partner.domain.enums import EvaluationDimension, InterviewRoundType
 from interview_practice_partner.domain.models import (
     DimensionScore,
     FeedbackReport,
@@ -129,28 +129,42 @@ class FeedbackService:
             WhatsApp-friendly plain-text feedback message and ``updated_session``
             has ``feedback_report`` populated.
         """
+        is_technical = session.interview_round_type in (
+            InterviewRoundType.DSA_CODING,
+            InterviewRoundType.SYSTEM_DESIGN,
+        )
+
         log = logger.bind(
             session_id=session.session_id,
             off_topic_count=session.off_topic_count,
             question_count=len(session.questions),
             response_count=len(session.responses),
+            round_type=session.interview_round_type.value if session.interview_round_type else None,
         )
         log.info("generating_feedback_report")
 
-        messages = self._prompt_builder.build_feedback_prompt(session=session)
+        if is_technical:
+            messages = self._prompt_builder.build_technical_feedback_prompt(session=session)
+        else:
+            messages = self._prompt_builder.build_feedback_prompt(session=session)
 
         try:
             raw = await self._llm.complete(messages, temperature=0.4, max_tokens=2048)
-            report = self._parse_feedback_response(raw, session)
+            if is_technical:
+                report = self._parse_technical_feedback_response(raw, session)
+            else:
+                report = self._parse_feedback_response(raw, session)
         except Exception as exc:  # noqa: BLE001
             log.warning("feedback_llm_call_failed", error=str(exc))
             report = self._build_fallback_report(session)
 
         # Post-process: enforce structural invariants
-        report = self._ensure_all_dimensions(report)
         report = self._ensure_minimum_lists(report)
-        report = self._ensure_off_topic_references(report, session)
-        report = self._ensure_focus_relevance_note(report, session)
+
+        if not is_technical:
+            report = self._ensure_all_dimensions(report)
+            report = self._ensure_off_topic_references(report, session)
+            report = self._ensure_focus_relevance_note(report, session)
 
         # Store the report in the session
         session.feedback_report = report
@@ -158,14 +172,20 @@ class FeedbackService:
         log.info(
             "feedback_report_generated",
             report_id=report.report_id,
-            dimension_count=len(report.dimension_scores),
             strengths_count=len(report.strengths),
             improvements_count=len(report.improvements),
             recommendations_count=len(report.actionable_recommendations),
-            off_topic_refs_count=len(report.off_topic_references),
         )
 
-        reply_text = self._format_feedback_message(report, session)
+        if is_technical:
+            log.info(
+                "technical_feedback_generated",
+                session_id=session.session_id,
+                round_type=session.interview_round_type.value if session.interview_round_type else None,
+            )
+            reply_text = self._format_technical_feedback_message(report, session)
+        else:
+            reply_text = self._format_feedback_message(report, session)
         return reply_text, session
 
     # ------------------------------------------------------------------
@@ -232,6 +252,171 @@ class FeedbackService:
                 raw_response=raw[:200],
             )
             return self._build_fallback_report(session)
+
+    # ------------------------------------------------------------------
+    # Technical feedback parsing and formatting
+    # ------------------------------------------------------------------
+
+    def _parse_technical_feedback_response(
+        self,
+        raw: str,
+        session: SessionState,
+    ) -> FeedbackReport:
+        """Parse the LLM JSON response for a technical round into a ``FeedbackReport``.
+
+        The technical feedback prompt returns a different JSON structure than the
+        behavioral prompt — it has no ``dimension_scores`` but may include
+        DSA-specific fields (``complexity_summary``, ``problem_solving_approach``)
+        or System Design-specific fields (``design_thinking``, ``scalability_awareness``).
+
+        These extra fields are folded into ``strengths`` or ``improvements`` so the
+        result fits the existing ``FeedbackReport`` model.
+
+        Falls back to a minimal valid ``FeedbackReport`` on parse failure.
+
+        Args:
+            raw: The raw LLM response string (expected to be JSON).
+            session: The current ``SessionState``.
+
+        Returns:
+            A ``FeedbackReport`` instance.
+        """
+        try:
+            data = json.loads(raw)
+
+            strengths: list[str] = list(data.get("strengths") or [])
+            improvements: list[str] = list(data.get("improvements") or [])
+            actionable_recommendations: list[str] = list(
+                data.get("actionable_recommendations") or []
+            )
+
+            round_type = session.interview_round_type
+
+            # Include DSA-specific fields as additional context entries
+            if round_type == InterviewRoundType.DSA_CODING:
+                complexity_summary = data.get("complexity_summary")
+                if complexity_summary:
+                    improvements.append(f"Complexity analysis: {complexity_summary}")
+
+                problem_solving = data.get("problem_solving_approach")
+                if problem_solving:
+                    strengths.append(f"Problem-solving approach: {problem_solving}")
+
+            # Include System Design-specific fields as additional context entries
+            elif round_type == InterviewRoundType.SYSTEM_DESIGN:
+                design_thinking = data.get("design_thinking")
+                if design_thinking:
+                    strengths.append(f"Design thinking: {design_thinking}")
+
+                scalability_awareness = data.get("scalability_awareness")
+                if scalability_awareness:
+                    improvements.append(f"Scalability awareness: {scalability_awareness}")
+
+            report = FeedbackReport(
+                report_id=str(uuid.uuid4()),
+                session_id=session.session_id,
+                dimension_scores=[],
+                strengths=strengths if strengths else ["Session completed."],
+                improvements=improvements if improvements else ["Continue practising."],
+                actionable_recommendations=(
+                    actionable_recommendations
+                    if actionable_recommendations
+                    else ["Keep practising mock interviews regularly."]
+                ),
+                off_topic_references=[],
+                generated_at=_now(),
+            )
+            return report
+
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "technical_feedback_json_parse_failed",
+                error=str(exc),
+                raw_response=raw[:200],
+            )
+            return self._build_fallback_report(session)
+
+    def _format_technical_feedback_message(
+        self,
+        report: FeedbackReport,
+        session: SessionState,
+    ) -> str:
+        """Format a technical ``FeedbackReport`` as a WhatsApp-friendly plain-text message.
+
+        Uses plain text with asterisks for bold emphasis and line breaks for
+        structure. No HTML tags, no markdown headers, no code blocks.
+
+        Args:
+            report: The ``FeedbackReport`` to format.
+            session: The ``SessionState`` (used for round type display).
+
+        Returns:
+            A formatted plain-text string suitable for WhatsApp delivery.
+        """
+        round_type = session.interview_round_type
+        if round_type == InterviewRoundType.DSA_CODING:
+            round_label = "DSA/Coding Round"
+        elif round_type == InterviewRoundType.SYSTEM_DESIGN:
+            round_label = "System Design Round"
+        else:
+            round_label = "Technical Round"
+
+        lines: list[str] = []
+
+        lines.append(f"*Your {round_label} Feedback*")
+        lines.append("")
+        lines.append(
+            "Well done on completing your technical mock interview! Here is your personalised feedback."
+        )
+        lines.append("")
+
+        # DSA-specific summary
+        if round_type == InterviewRoundType.DSA_CODING:
+            if session.topics_covered:
+                topics = ", ".join(t.value.replace("_", " ").title() for t in session.topics_covered)
+                lines.append(f"*Topics Covered:* {topics}")
+                lines.append("")
+            if session.difficulty_adjustment_history:
+                lines.append("*Difficulty Progression*")
+                for adj in session.difficulty_adjustment_history:
+                    from_d = adj.get("from", "unknown").title()
+                    to_d = adj.get("to", "unknown").title()
+                    reason = adj.get("reason", "")
+                    lines.append(f"- {from_d} -> {to_d}: {reason}")
+                lines.append("")
+
+        # System Design-specific summary
+        elif round_type == InterviewRoundType.SYSTEM_DESIGN:
+            if session.design_aspects_covered:
+                aspects = ", ".join(
+                    a.value.replace("_", " ").title() for a in session.design_aspects_covered
+                )
+                lines.append(f"*Design Aspects Covered:* {aspects}")
+                lines.append("")
+
+        # Strengths
+        lines.append("*Strengths*")
+        for strength in report.strengths:
+            lines.append(f"- {strength}")
+        lines.append("")
+
+        # Areas for improvement
+        lines.append("*Areas for Improvement*")
+        for improvement in report.improvements:
+            lines.append(f"- {improvement}")
+        lines.append("")
+
+        # Actionable recommendations
+        lines.append("*Actionable Recommendations*")
+        for rec in report.actionable_recommendations:
+            lines.append(f"- {rec}")
+        lines.append("")
+
+        lines.append(
+            "Keep practising — every session brings you closer to interview success!"
+        )
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Fallback report

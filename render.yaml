@@ -42,7 +42,7 @@ services:
       
       # Media Serving
       - key: MEDIA_BASE_URL
-        value: https://interview-practice-partner.onrender.com
+        value: https://interview-practice-partner-3aw0.onrender.com
       - key: MEDIA_TTL_SECONDS
         value: 600
       

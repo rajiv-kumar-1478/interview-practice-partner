@@ -27,11 +27,13 @@ PHONE = "+15550001234"
 
 def make_session(**overrides) -> SessionState:
     """Create a test SessionState with sensible defaults."""
+    from interview_practice_partner.domain.enums import InterviewRoundType
     defaults = dict(
         session_id=str(uuid.uuid4()),
         phone_number=PHONE,
         stage=Stage.INTERVIEW,
         role=Role.SOFTWARE_ENGINEER,
+        interview_round_type=InterviewRoundType.BEHAVIORAL,
         created_at=NOW,
         updated_at=NOW,
     )

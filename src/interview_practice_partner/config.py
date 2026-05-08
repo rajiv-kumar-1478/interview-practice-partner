@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     media_base_url: str = ""  # e.g. "https://your-domain.com" — set in production
     media_ttl_seconds: int = 600  # 10 minutes
 
+    # Technical Interview Rounds
+    enable_dsa_rounds: bool = True
+    enable_system_design_rounds: bool = True
+    dsa_max_problems_per_session: int = 5
+    system_design_max_questions_per_session: int = 2
+    technical_eval_temperature: float = 0.3
+    technical_generation_temperature: float = 0.8
+
     # Application
     app_version: str = "1.0.0"
     log_level: str = "INFO"

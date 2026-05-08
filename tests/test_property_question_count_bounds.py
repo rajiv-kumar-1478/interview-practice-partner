@@ -18,7 +18,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from interview_practice_partner.domain.enums import EvaluationDimension, QuestionType, Role, Stage
+from interview_practice_partner.domain.enums import EvaluationDimension, InterviewRoundType, QuestionType, Role, Stage
 from interview_practice_partner.domain.models import (
     DimensionScore,
     FeedbackReport,
@@ -497,6 +497,7 @@ async def test_property_9e_session_service_transitions_at_5_answered_questions(
         updated_at=now,
         completed_at=None,
         context_summary=None,
+        interview_round_type=InterviewRoundType.BEHAVIORAL,
     )
 
     # Mock the evaluation response: on-topic, no follow-up, maintain difficulty

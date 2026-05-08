@@ -115,6 +115,11 @@ def make_service(
 
     mock_interview = AsyncMock()
     mock_interview.generate_question.return_value = interview_question
+    # Set up handle_response to return a sensible default for round type selection
+    mock_interview.handle_response.return_value = (
+        "Which round type would you like to practice?",
+        make_session(stage=Stage.ROUND_TYPE_SELECTION, role=Role.SOFTWARE_ENGINEER),
+    )
 
     mock_feedback = AsyncMock()
 
@@ -148,7 +153,7 @@ class TestInitStage:
 
     @pytest.mark.asyncio
     async def test_init_with_role_in_message_fast_path_to_interview(self):
-        """INIT with role in message → INTERVIEW directly (fast-path, Req 6.1)."""
+        """INIT with SWE role in message → ROUND_TYPE_SELECTION (fast-path, Req 6.1)."""
         service, _, mock_interview, _ = make_service(
             interview_question="Describe a time you led a project."
         )
@@ -156,10 +161,10 @@ class TestInitStage:
 
         reply, updated = await service.transition(session, "I want to practise as a software engineer.")
 
-        assert updated.stage == Stage.INTERVIEW
+        assert updated.stage == Stage.ROUND_TYPE_SELECTION
         assert updated.role == Role.SOFTWARE_ENGINEER
-        mock_interview.generate_question.assert_called_once()
-        assert "Describe a time you led a project." in reply
+        # generate_question should NOT be called (we're in round type selection)
+        mock_interview.generate_question.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_init_with_sales_role_fast_path(self):
@@ -220,7 +225,7 @@ class TestInitStage:
 class TestRoleSelectionStage:
     @pytest.mark.asyncio
     async def test_role_confirmed_transitions_to_interview(self):
-        """ROLE_SELECTION with high-confidence role → INTERVIEW."""
+        """ROLE_SELECTION with high-confidence SWE role → ROUND_TYPE_SELECTION."""
         service, mock_llm, mock_interview, _ = make_service(
             llm_response='{"role": "software_engineer", "confidence": "high", "message": "Great!"}',
             interview_question="What is your experience with Python?",
@@ -229,10 +234,10 @@ class TestRoleSelectionStage:
 
         reply, updated = await service.transition(session, "I want to be a software engineer.")
 
-        assert updated.stage == Stage.INTERVIEW
+        assert updated.stage == Stage.ROUND_TYPE_SELECTION
         assert updated.role == Role.SOFTWARE_ENGINEER
-        mock_interview.generate_question.assert_called_once()
-        assert "What is your experience with Python?" in reply
+        # generate_question should NOT be called (we're in round type selection)
+        mock_interview.generate_question.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_low_confidence_role_stays_in_role_selection(self):

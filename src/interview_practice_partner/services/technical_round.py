@@ -297,8 +297,10 @@ class TechnicalRoundService:
                 raw, problem, response, solution_format
             )
             log.info(
-                "coding_solution_evaluated",
+                "solution_evaluated",
                 correctness=evaluation.correctness,
+                time_complexity=evaluation.complexity_analysis.time_complexity if evaluation.complexity_analysis else None,
+                space_complexity=evaluation.complexity_analysis.space_complexity if evaluation.complexity_analysis else None,
                 difficulty_signal=evaluation.difficulty_signal,
             )
             return evaluation
@@ -683,9 +685,25 @@ class TechnicalRoundService:
 
         try:
             raw = await self._llm.complete(messages, temperature=0.3, max_tokens=1024)
-            evaluation = self._parse_system_design_evaluation_response(
+            evaluation, next_phase = self._parse_system_design_evaluation_response(
                 raw, question, response
             )
+
+            # Update session.design_aspects_covered with newly evaluated aspects
+            for aspect_key in evaluation.design_aspects_evaluated:
+                if aspect_key not in session.design_aspects_covered:
+                    session.design_aspects_covered.append(aspect_key)
+
+            # Handle phase progression suggestion from LLM
+            if next_phase is not None and next_phase != session.design_phase:
+                log.info(
+                    "design_phase_transition",
+                    session_id=session.session_id,
+                    from_phase=session.design_phase.value if session.design_phase else None,
+                    to_phase=next_phase.value,
+                )
+                session.design_phase = next_phase
+
             log.info(
                 "system_design_evaluated",
                 aspects_count=len(evaluation.design_aspects_evaluated),
@@ -702,8 +720,8 @@ class TechnicalRoundService:
         raw: str,
         question: SystemDesignQuestion,
         response: UserResponse,
-    ) -> TechnicalEvaluation:
-        """Parse the LLM JSON response into a ``TechnicalEvaluation``.
+    ) -> tuple[TechnicalEvaluation, Optional[DesignPhase]]:
+        """Parse the LLM JSON response into a ``TechnicalEvaluation`` and optional next phase.
 
         Falls back to safe defaults if JSON parsing fails.
 
@@ -713,8 +731,15 @@ class TechnicalRoundService:
             response: The user's response.
 
         Returns:
-            A ``TechnicalEvaluation`` instance.
+            A tuple of (``TechnicalEvaluation``, optional next ``DesignPhase``).
         """
+        _phase_map = {
+            "requirements_gathering": DesignPhase.REQUIREMENTS_GATHERING,
+            "high_level_design": DesignPhase.HIGH_LEVEL_DESIGN,
+            "deep_dive": DesignPhase.DEEP_DIVE,
+            "bottleneck_analysis": DesignPhase.BOTTLENECK_ANALYSIS,
+        }
+
         try:
             data = json.loads(raw)
 
@@ -730,7 +755,12 @@ class TechnicalRoundService:
                 difficulty_signal="maintain",  # Not used for system design
                 evaluated_at=_now(),
             )
-            return evaluation
+
+            # Parse next_phase_suggestion if present
+            next_phase_str = data.get("next_phase_suggestion")
+            next_phase = _phase_map.get(next_phase_str) if next_phase_str else None
+
+            return evaluation, next_phase
 
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
             logger.warning(
@@ -738,7 +768,7 @@ class TechnicalRoundService:
                 error=str(exc),
                 raw_response=raw[:200],
             )
-            return self._build_fallback_system_design_evaluation(question, response)
+            return self._build_fallback_system_design_evaluation(question, response), None
 
     def _build_fallback_system_design_evaluation(
         self,
@@ -773,6 +803,34 @@ class TechnicalRoundService:
     # System Design Round: Phase Progression
     # ------------------------------------------------------------------
 
+    # Keyword signals that indicate the user is moving into a particular phase
+    _PHASE_KEYWORDS: dict[DesignPhase, list[str]] = {
+        DesignPhase.REQUIREMENTS_GATHERING: [
+            "requirement", "functional", "non-functional", "scale", "users",
+            "traffic", "qps", "latency", "availability", "constraint",
+        ],
+        DesignPhase.HIGH_LEVEL_DESIGN: [
+            "architecture", "component", "service", "microservice", "diagram",
+            "high level", "high-level", "overview", "flow", "interact",
+        ],
+        DesignPhase.DEEP_DIVE: [
+            "deep dive", "deep-dive", "detail", "implement", "algorithm",
+            "data model", "schema", "index", "shard", "partition", "replicate",
+        ],
+        DesignPhase.BOTTLENECK_ANALYSIS: [
+            "bottleneck", "scalab", "failure", "single point", "spof",
+            "optimize", "performance", "throughput", "limit", "improve",
+        ],
+    }
+
+    # Ordered list of all phases for progression logic
+    _PHASE_ORDER: list[DesignPhase] = [
+        DesignPhase.REQUIREMENTS_GATHERING,
+        DesignPhase.HIGH_LEVEL_DESIGN,
+        DesignPhase.DEEP_DIVE,
+        DesignPhase.BOTTLENECK_ANALYSIS,
+    ]
+
     def determine_next_design_phase(
         self,
         session: SessionState,
@@ -780,8 +838,14 @@ class TechnicalRoundService:
     ) -> DesignPhase:
         """Determine next system design phase based on conversation flow.
 
-        Uses the current phase and allows natural progression through:
-        REQUIREMENTS_GATHERING → HIGH_LEVEL_DESIGN → DEEP_DIVE → BOTTLENECK_ANALYSIS
+        Allows natural phase transitions — the user can skip phases or jump
+        ahead based on the content of their response. Phase skipping is
+        handled gracefully: if the response signals a later phase, we jump
+        directly to it rather than enforcing strict sequential progression.
+
+        If the current phase is ``None``, defaults to
+        ``REQUIREMENTS_GATHERING``. If the current phase is
+        ``BOTTLENECK_ANALYSIS`` (the last phase), stays there.
 
         Args:
             session: The current ``SessionState``.
@@ -791,33 +855,114 @@ class TechnicalRoundService:
             The next ``DesignPhase`` to guide the user through.
         """
         current_phase = session.design_phase or DesignPhase.REQUIREMENTS_GATHERING
+        response_text = response.text.lower()
 
-        # Simple linear progression for now
-        # In a more sophisticated implementation, this could use LLM evaluation
-        # to determine if the user is ready to move to the next phase
-        phase_order = [
-            DesignPhase.REQUIREMENTS_GATHERING,
-            DesignPhase.HIGH_LEVEL_DESIGN,
-            DesignPhase.DEEP_DIVE,
-            DesignPhase.BOTTLENECK_ANALYSIS,
-        ]
+        log = logger.bind(
+            session_id=session.session_id,
+            current_phase=current_phase.value,
+        )
 
+        # Stay at the final phase — there is nowhere left to go
+        if current_phase == DesignPhase.BOTTLENECK_ANALYSIS:
+            log.debug("design_phase_at_final_phase", phase=current_phase.value)
+            return current_phase
+
+        # Detect the most advanced phase signalled by the response text.
+        # This allows natural skipping: if the user jumps straight to
+        # bottleneck language we honour that rather than forcing them back.
+        detected_phase: Optional[DesignPhase] = None
+        for phase in reversed(self._PHASE_ORDER):
+            keywords = self._PHASE_KEYWORDS.get(phase, [])
+            if any(kw in response_text for kw in keywords):
+                detected_phase = phase
+                break
+
+        # Determine the next phase
         try:
-            current_index = phase_order.index(current_phase)
-            if current_index < len(phase_order) - 1:
-                next_phase = phase_order[current_index + 1]
-            else:
-                next_phase = current_phase  # Stay at final phase
+            current_index = self._PHASE_ORDER.index(current_phase)
         except ValueError:
-            # Current phase not in order, default to first phase
-            next_phase = DesignPhase.REQUIREMENTS_GATHERING
+            # Unknown phase — reset to the beginning
+            log.warning(
+                "design_phase_unknown",
+                phase=current_phase.value,
+            )
+            return DesignPhase.REQUIREMENTS_GATHERING
 
+        if detected_phase is not None:
+            try:
+                detected_index = self._PHASE_ORDER.index(detected_phase)
+            except ValueError:
+                detected_index = current_index
+
+            # Allow jumping forward (skip phases) but never go backwards
+            if detected_index > current_index:
+                next_phase = detected_phase
+            else:
+                # Response signals current or earlier phase — advance by one
+                next_phase = self._PHASE_ORDER[min(current_index + 1, len(self._PHASE_ORDER) - 1)]
+        else:
+            # No strong signal — advance linearly by one step
+            next_phase = self._PHASE_ORDER[min(current_index + 1, len(self._PHASE_ORDER) - 1)]
+
+        # Log the transition (only when the phase actually changes)
         if next_phase != current_phase:
-            logger.info(
+            skipped = (
+                self._PHASE_ORDER.index(next_phase) - current_index > 1
+            )
+            log.info(
                 "design_phase_transition",
-                session_id=session.session_id,
                 from_phase=current_phase.value,
                 to_phase=next_phase.value,
+                skipped=skipped,
             )
 
         return next_phase
+
+    # ------------------------------------------------------------------
+    # DSA/Coding Round: Hint Generation
+    # ------------------------------------------------------------------
+
+    async def generate_hint(
+        self,
+        problem: CodingProblem,
+        hint_number: int = 1,
+    ) -> str:
+        """Generate a progressive hint for a coding problem.
+
+        Each successive hint is slightly more revealing than the last, but
+        never reveals the full solution. Hint 1 is the most subtle; hint 3+
+        is the most direct while still withholding the complete answer.
+
+        Args:
+            problem: The ``CodingProblem`` for which a hint is requested.
+            hint_number: Which hint to generate (1 = most subtle, 3+ = most direct).
+                         Defaults to 1.
+
+        Returns:
+            A plain-text hint string to send to the user.
+        """
+        log = logger.bind(
+            problem_id=problem.problem_id,
+            hint_number=hint_number,
+            difficulty=problem.difficulty.value,
+            topic=problem.topic.value,
+        )
+        log.info("hint_requested")
+
+        messages = self._prompt_builder.build_hint_prompt(
+            problem=problem,
+            hint_number=hint_number,
+        )
+
+        try:
+            hint_text = await self._llm.complete(messages, temperature=0.5, max_tokens=256)
+            log.info("hint_generated", hint_number=hint_number)
+            return hint_text.strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("hint_generation_failed", error=str(exc), hint_number=hint_number)
+            # Fallback hint that is always safe to return
+            return (
+                f"Here's a hint for this problem: think about what data structure "
+                f"would allow you to look up values efficiently. "
+                f"Consider the time complexity trade-offs between your options."
+            )

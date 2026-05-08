@@ -849,3 +849,106 @@ class PromptBuilder:
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},
         ]
+
+    def build_hint_prompt(
+        self,
+        problem: CodingProblem,
+        hint_number: int,
+    ) -> list[dict[str, str]]:
+        """Build a prompt for generating a progressive hint for a coding problem.
+
+        Hints are progressive — each successive hint is slightly more revealing
+        than the last, but none should give away the full solution.
+
+        Args:
+            problem: The ``CodingProblem`` for which a hint is requested.
+            hint_number: Which hint to generate (1 = most subtle, 3+ = more direct).
+
+        Returns:
+            A messages list with a system prompt and hint request.
+        """
+        if hint_number <= 1:
+            hint_guidance = (
+                "Provide a very subtle hint. Point the candidate toward the right "
+                "problem-solving category or data structure without naming it explicitly. "
+                "For example, suggest thinking about how to avoid repeated work, or "
+                "mention that a particular traversal pattern might be useful."
+            )
+        elif hint_number == 2:
+            hint_guidance = (
+                "Provide a moderate hint. You may name the key data structure or "
+                "algorithmic technique (e.g., 'consider using a hash map' or "
+                "'a sliding window approach could help here'), but do NOT describe "
+                "the full algorithm or give away the implementation."
+            )
+        else:
+            hint_guidance = (
+                "Provide a more direct hint. Describe the high-level approach or "
+                "the first key step of the algorithm (e.g., 'start by sorting the "
+                "array, then use two pointers from each end'). Still do NOT write "
+                "out the complete solution or full code."
+            )
+
+        system_content = (
+            "You are a supportive technical interview coach helping a candidate who "
+            "is stuck on a coding problem.\n\n"
+            f"Problem:\n{problem.text}\n\n"
+            f"Constraints: {problem.constraints}\n\n"
+            f"Examples:\n" + "\n".join(problem.examples) + "\n\n"
+            f"This is hint #{hint_number}.\n\n"
+            f"{hint_guidance}\n\n"
+            "Rules:\n"
+            "- Do NOT reveal the complete solution or write out the full algorithm.\n"
+            "- Keep the hint concise (2–4 sentences).\n"
+            "- Be encouraging and supportive in tone.\n"
+            "- Use plain text only — no HTML, no markdown headers.\n\n"
+            f"{_FORMATTING_RULES}"
+        )
+
+        user_content = f"Please give me hint #{hint_number} for this problem."
+
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+
+    def build_problem_solution_prompt(
+        self,
+        problem_text: str,
+        difficulty: ProblemDifficulty,
+    ) -> list[dict[str, str]]:
+        """Build a prompt for generating a solution explanation for a skipped DSA problem.
+
+        Used when a user requests the solution to a coding problem (Req 14.4).
+
+        Args:
+            problem_text: The text of the coding problem.
+            difficulty: The difficulty level of the problem.
+
+        Returns:
+            A messages list with a system prompt and solution request.
+        """
+        system_content = (
+            "You are an expert software engineer and interview coach. "
+            "A candidate has requested the solution to a coding problem they skipped. "
+            "Provide a clear, educational solution with explanation.\n\n"
+            "Your response should include:\n"
+            "1. The key insight or approach\n"
+            "2. A clean solution (pseudocode or Python)\n"
+            "3. Time and space complexity analysis\n"
+            "4. Any important edge cases to consider\n\n"
+            "Keep the explanation concise but thorough. "
+            "Use plain text with *asterisks* for emphasis. "
+            "Do NOT use HTML tags or markdown headers."
+        )
+
+        user_content = (
+            f"Problem ({difficulty.value} difficulty):\n\n"
+            f"{problem_text}\n\n"
+            "Please provide the solution with explanation."
+        )
+
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]

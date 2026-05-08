@@ -84,7 +84,7 @@ def make_session_state(**overrides) -> SessionState:
 class TestStageEnum:
     def test_all_members_exist(self):
         members = {m.name for m in Stage}
-        assert members == {"INIT", "ROLE_SELECTION", "INTERVIEW", "FEEDBACK", "COMPLETE"}
+        assert members == {"INIT", "ROLE_SELECTION", "ROUND_TYPE_SELECTION", "INTERVIEW", "FEEDBACK", "COMPLETE"}
 
     def test_string_values(self):
         assert Stage.INIT == "INIT"

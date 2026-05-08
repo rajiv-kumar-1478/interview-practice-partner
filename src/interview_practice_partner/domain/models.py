@@ -83,6 +83,7 @@ class SessionState(BaseModel):
     topics_covered: list[ProblemTopic] = Field(default_factory=list)
     design_aspects_covered: list[DesignAspect] = Field(default_factory=list)
     difficulty_adjustment_history: list[dict] = Field(default_factory=list)
+    consecutive_skips_count: int = 0
 
 
 class CodingProblem(BaseModel):
